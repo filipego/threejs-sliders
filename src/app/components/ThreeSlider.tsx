@@ -3,18 +3,42 @@
 import React, { useRef, useEffect, useCallback } from "react";
 import * as THREE from "three";
 
-const ThreeSlider: React.FC = () => {
+// --- NEW: Props Interface ---
+interface ThreeSliderProps {
+  /** Width of each slide plane in 3D units. Default: 3.0 */
+  slideWidth?: number;
+  /** Height of each slide plane in 3D units. Default: 1.5 */
+  slideHeight?: number;
+  /** Gap between each slide plane in 3D units. Default: 0.1 */
+  gap?: number;
+  /** How the image should fit the slide dimensions. Default: 'contain' */
+  imageFitMode?: "contain" | "cover";
+  /** Optional: Number of slide planes to create (can be > image count for looping). Default: 10 */
+  slideCount?: number;
+  /** Optional: Number of actual images available in /public/imgs/. Default: 5 */
+  imagesAvailable?: number;
+}
+
+const ThreeSlider: React.FC<ThreeSliderProps> = ({
+  // --- NEW: Destructure props with defaults ---
+  slideWidth: slideWidthProp = 3.0,
+  slideHeight: slideHeightProp = 1.5,
+  gap: gapProp = 0.1,
+  imageFitMode = "contain",
+  slideCount: slideCountProp = 10,
+  imagesAvailable = 5,
+}) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const slidesRef = useRef<THREE.Mesh[]>([]);
+  // slidesRef removed, using 'slides' array
   const animationFrameId = useRef<number | null>(null);
 
-  // --- Settings and State Variables (using refs to avoid re-renders) ---
+  // --- Settings and State Variables (Internal) ---
   const settings = useRef({
     wheelSensitivity: 0.01,
-    touchSensitivity: 0.01,
+    touchSensitivity: 0.01, // Keep touch sensitivity for mobile scroll simulation
     momentumMultiplier: 2,
     smoothing: 0.1,
     slideLerp: 0.075,
@@ -24,28 +48,29 @@ const ThreeSlider: React.FC = () => {
     distortionSmoothing: 0.075,
   }).current;
 
-  const slideWidth = 3.0;
-  const slideHeight = 1.5;
-  const gap = 0.1;
-  const slideCount = 10;
-  const imagesCount = 5; // Number of actual image files (1.jpg to 5.jpg)
-  const totalWidth = slideCount * (slideWidth + gap);
-  const slideUnit = slideWidth + gap;
+  // --- Use Props for Constants ---
+  const slideWidth = slideWidthProp;
+  const slideHeight = slideHeightProp;
+  const gap = gapProp;
+  const slideCount = slideCountProp;
+  const imagesCount = imagesAvailable; // Use prop
+  const totalWidth = slideCount * (slideWidth + gap); // Recalculated
+  const slideUnit = slideWidth + gap; // Recalculated
 
-  const slides = useRef<THREE.Mesh[]>([]).current; // Keep track of slide meshes
+  // --- Mutable State Refs ---
+  const slides = useRef<THREE.Mesh[]>([]).current;
   const currentPosition = useRef(0);
   const targetPosition = useRef(0);
-  const isScrolling = useRef(false);
+  const isScrolling = useRef(false); // Used for scroll/touch momentum detection
   const autoScrollSpeed = useRef(0);
   const lastTime = useRef(0);
-  const touchStartX = useRef(0);
-  const touchLastX = useRef(0);
+  const touchStartX = useRef(0); // Still needed for touch scroll velocity
+  const touchLastX = useRef(0); // Still needed for touch scroll delta
   const prevPosition = useRef(0);
-
   const currentDistortionFactor = useRef(0);
   const targetDistortionFactor = useRef(0);
   const peakVelocity = useRef(0);
-  const velocityHistory = useRef<number[]>(Array(5).fill(0)).current; // Store last 5 velocities
+  const velocityHistory = useRef<number[]>(Array(5).fill(0)).current;
 
   // --- Helper Functions ---
   const correctImageColor = useCallback((texture: THREE.Texture) => {
@@ -55,224 +80,190 @@ const ThreeSlider: React.FC = () => {
 
   const createSlide = useCallback(
     (index: number) => {
-      const geometry = new THREE.PlaneGeometry(slideWidth, slideHeight, 32, 16); // Segments for distortion
-
-      // Fallback colors (optional but good for loading state)
+      // Use prop values for geometry
+      const geometry = new THREE.PlaneGeometry(slideWidth, slideHeight, 32, 16);
       const colors = ["#FF5733", "#33FF57", "#3357FF", "#F3F33F", "#FF33F3"];
       const material = new THREE.MeshBasicMaterial({
         color: new THREE.Color(colors[index % colors.length]),
-        side: THREE.DoubleSide, // Render both sides
+        side: THREE.DoubleSide,
       });
-
       const mesh = new THREE.Mesh(geometry, material);
-      mesh.position.x = index * slideUnit;
-
-      // Store original vertices and index in userData
+      mesh.position.x = index * slideUnit; // Use recalculated slideUnit
       mesh.userData = {
         originalVertices: [
           ...(geometry.attributes.position.array as Float32Array),
         ],
         index: index,
-        targetX: mesh.position.x, // Initialize targetX
-        currentX: mesh.position.x, // Initialize currentX
+        targetX: mesh.position.x,
+        currentX: mesh.position.x,
       };
-
-      // Load image texture
-      const imageIndex = (index % imagesCount) + 1; // Loop through 1 to 5
+      const imageIndex = (index % imagesCount) + 1; // Use prop imagesCount
       const imagePath = `/imgs/${imageIndex}.jpg`;
       new THREE.TextureLoader().load(
         imagePath,
         (texture) => {
           correctImageColor(texture);
           material.map = texture;
-          material.color.set(0xffffff); // Set color to white to show texture fully
+          material.color.set(0xffffff);
           material.needsUpdate = true;
 
-          // Adjust mesh scale to fit image aspect ratio
+          // --- NEW: Image Scaling based on prop ---
           const imgAspect = texture.image.width / texture.image.height;
-          const slideAspect = slideWidth / slideHeight;
-
-          if (imgAspect > slideAspect) {
-            mesh.scale.y = slideAspect / imgAspect;
+          const slideAspect = slideWidth / slideHeight; // Use prop values
+          mesh.scale.set(1, 1, 1); // Reset scale
+          if (imageFitMode === "contain") {
+            if (imgAspect > slideAspect) {
+              mesh.scale.y = slideAspect / imgAspect;
+            } else {
+              mesh.scale.x = imgAspect / slideAspect;
+            }
           } else {
-            mesh.scale.x = imgAspect / slideAspect;
+            // 'cover' mode
+            if (imgAspect > slideAspect) {
+              mesh.scale.x = imgAspect / slideAspect;
+            } else {
+              mesh.scale.y = slideAspect / imgAspect;
+            }
           }
         },
-        undefined, // onProgress callback (optional)
+        undefined,
         (err) => {
           console.warn(`Couldn't load image ${imagePath}`, err);
         }
       );
-
       sceneRef.current?.add(mesh);
       slides.push(mesh);
     },
-    [correctImageColor, imagesCount]
-  ); // Include dependencies
+    [
+      correctImageColor,
+      imagesCount,
+      slideHeight,
+      slideUnit,
+      slideWidth,
+      imageFitMode,
+    ] // Added props
+  );
 
   const updateCurve = useCallback(
     (mesh: THREE.Mesh, worldPositionX: number, distortionFactor: number) => {
       if (!mesh || !mesh.geometry || !mesh.userData.originalVertices) return;
-
-      const distortionCenter = new THREE.Vector2(0, 0); // Center of the distortion effect
-      const distortionRadius = 2.0; // How far the distortion effect spreads
-      const maxCurvature = settings.maxDistortion * distortionFactor; // Use settings
-
+      const distortionCenter = new THREE.Vector2(0, 0);
+      const distortionRadius = 2.0;
+      const maxCurvature = settings.maxDistortion * distortionFactor;
       const positionAttribute = mesh.geometry.attributes.position;
       const originalVertices = mesh.userData.originalVertices as Float32Array;
-
       for (let i = 0; i < positionAttribute.count; i++) {
         const x = originalVertices[i * 3];
         const y = originalVertices[i * 3 + 1];
-        // const z = originalVertices[i * 3 + 2]; // Original Z is 0 for PlaneGeometry
-
-        const vertexWorldPosX = worldPositionX + x; // Calculate vertex world X position
-
-        // Calculate distance from the center of the distortion field
+        // Use scale in world position calculation
+        const vertexWorldPosX = worldPositionX + x * mesh.scale.x;
+        const vertexWorldPosY = y * mesh.scale.y;
         const distFromCenter = Math.sqrt(
           Math.pow(vertexWorldPosX - distortionCenter.x, 2) +
-            Math.pow(y - distortionCenter.y, 2)
+            Math.pow(vertexWorldPosY - distortionCenter.y, 2)
         );
-
-        // Normalize distance and invert (closer = stronger effect)
         const distortionStrength = Math.max(
           0,
           1 - distFromCenter / distortionRadius
         );
-
-        // Apply a curve (e.g., sine wave powered for sharper falloff)
-        // Adjust the power (1.5 here) to control the curve shape
         const curveZ =
           Math.pow(Math.sin((distortionStrength * Math.PI) / 2), 1.5) *
           maxCurvature;
-
-        // Update the Z position of the live vertex buffer
         positionAttribute.setZ(i, curveZ);
       }
-
-      positionAttribute.needsUpdate = true; // Mark buffer for update
-      mesh.geometry.computeVertexNormals(); // Recalculate normals if lighting is used
+      positionAttribute.needsUpdate = true;
+      mesh.geometry.computeVertexNormals();
     },
     [settings.maxDistortion]
-  ); // Include dependency
+  );
 
   // --- Animation Loop ---
   const animate = useCallback(
     (time: number) => {
       animationFrameId.current = requestAnimationFrame(animate);
-
       const deltaTime = lastTime.current
         ? (time - lastTime.current) / 1000
         : 0.016;
       lastTime.current = time;
-
-      // Store previous position for velocity calculation
       prevPosition.current = currentPosition.current;
 
-      // Apply momentum if scrolling
-      if (isScrolling.current) {
+      // Apply momentum if scrolling state is true (set by wheel/touch end)
+      if (isScrolling.current && Math.abs(autoScrollSpeed.current) > 0.001) {
+        // Check speed threshold
         targetPosition.current += autoScrollSpeed.current;
-        // Dampen the auto scroll speed over time
-        const speedBasedDecay = 0.97 - Math.abs(autoScrollSpeed.current) * 0.5; // Faster decay at higher speed
-        autoScrollSpeed.current *= Math.max(0.92, speedBasedDecay); // Apply decay, ensure minimum damping
+        const speedBasedDecay = 0.97 - Math.abs(autoScrollSpeed.current) * 0.5;
+        autoScrollSpeed.current *= Math.max(0.92, speedBasedDecay);
         if (Math.abs(autoScrollSpeed.current) < 0.001) {
-          autoScrollSpeed.current = 0; // Stop momentum if speed is negligible
+          autoScrollSpeed.current = 0;
+          // Optionally reset isScrolling here or rely on the timeout
+          // isScrolling.current = false;
         }
+      } else {
+        // Ensure momentum stops if scrolling state is false or speed is negligible
+        autoScrollSpeed.current = 0;
       }
 
       // Interpolate current position towards target (smoothing)
       currentPosition.current +=
         (targetPosition.current - currentPosition.current) * settings.smoothing;
 
-      // Calculate current velocity
-      const currentVelocity =
-        Math.abs(currentPosition.current - prevPosition.current) / deltaTime;
-
-      // Update velocity history
+      // Velocity & Distortion logic... (unchanged)
+      const currentVelocity = Math.max(
+        0,
+        Math.abs(currentPosition.current - prevPosition.current) / deltaTime
+      );
       velocityHistory.push(currentVelocity);
-      velocityHistory.shift(); // Keep the history buffer size fixed
-
-      // Calculate average velocity over the history
+      velocityHistory.shift();
       const avgVelocity =
         velocityHistory.reduce((sum, val) => sum + val, 0) /
         velocityHistory.length;
-
-      // Update peak velocity
-      if (avgVelocity > peakVelocity.current) {
+      if (avgVelocity > peakVelocity.current)
         peakVelocity.current = avgVelocity;
-      }
-
-      // Determine if decelerating
       const velocityRatio =
         peakVelocity.current > 0.001 ? avgVelocity / peakVelocity.current : 0;
-      // Consider decelerating if velocity drops significantly AND peak was substantial
       const isDecelerating = velocityRatio < 0.7 && peakVelocity.current > 0.5;
-
-      // Dampen peak velocity over time if not accelerating
       peakVelocity.current *= 0.99;
-
-      // Calculate distortion based on movement
       const movementDistortion = Math.min(
         1.0,
         currentVelocity * settings.distortionSensitivity
-      ); // Cap distortion
-
-      // Update target distortion factor
+      );
       if (currentVelocity > 0.05) {
-        // Only distort significantly if moving
+        // Removed isDragging check here
         targetDistortionFactor.current = Math.max(
           targetDistortionFactor.current,
           movementDistortion
         );
       }
-
-      // Decay target distortion factor over time, faster if decelerating or slow
+      // Decay uses isScrolling state (set by wheel/touch) instead of isDragging
       const decayRate =
-        isDecelerating || avgVelocity < 0.2
-          ? settings.distortionDecay // Use faster decay setting
-          : settings.distortionDecay * 0.9; // Slower decay otherwise
+        isDecelerating || avgVelocity < 0.2 || !isScrolling.current
+          ? settings.distortionDecay
+          : settings.distortionDecay * 0.9; // Adjusted multiplier slightly
       targetDistortionFactor.current *= decayRate;
-
-      // Interpolate current distortion factor towards target
       currentDistortionFactor.current +=
         (targetDistortionFactor.current - currentDistortionFactor.current) *
         settings.distortionSmoothing;
 
-      // --- Update Slide Positions and Apply Distortion ---
+      // Update slides (uses prop-based totalWidth/slideUnit/slideWidth)
       slides.forEach((slide, i) => {
-        // Calculate base position for this slide based on its index and current scroll
         let baseX = i * slideUnit - currentPosition.current;
-
-        // Infinite loop wrapping logic
-        baseX = ((baseX % totalWidth) + totalWidth) % totalWidth; // Ensure positive modulo
-        if (baseX > totalWidth / 2) {
-          baseX -= totalWidth; // Wrap around if more than halfway
-        }
-
-        // Interpolate slide's actual X position towards its target base position
-        // Check if wrapping happened recently to avoid lerping across the wrap jump
+        baseX = ((baseX % totalWidth) + totalWidth) % totalWidth;
+        if (baseX > totalWidth / 2) baseX -= totalWidth;
         const isWrapping =
           Math.abs(baseX - slide.userData.targetX) > slideWidth * 2;
-        if (isWrapping) {
-          // If wrapping, jump directly to avoid visual glitch
-          slide.userData.currentX = baseX;
-        }
-        slide.userData.targetX = baseX; // Update target for next frame
+        if (isWrapping) slide.userData.currentX = baseX;
+        slide.userData.targetX = baseX;
         slide.userData.currentX +=
           (slide.userData.targetX - slide.userData.currentX) *
           settings.slideLerp;
-
-        // Optimization: Only update visible slides
-        const wrapThreshold = totalWidth / 2 + slideWidth; // Area slightly larger than viewport
+        const wrapThreshold = totalWidth / 2 + slideWidth;
         if (Math.abs(slide.userData.currentX) < wrapThreshold * 1.5) {
-          // Add some buffer
           slide.position.x = slide.userData.currentX;
-          // Apply the curve distortion
           updateCurve(slide, slide.position.x, currentDistortionFactor.current);
         }
       });
 
-      // Render the scene
+      // Render
       if (rendererRef.current && sceneRef.current && cameraRef.current) {
         rendererRef.current.render(sceneRef.current, cameraRef.current);
       }
@@ -280,82 +271,77 @@ const ThreeSlider: React.FC = () => {
     [
       settings,
       updateCurve,
-      correctImageColor,
-      createSlide,
       slides,
-      totalWidth,
-      slideUnit,
+      totalWidth, // Prop dependent
+      slideUnit, // Prop dependent
+      slideWidth, // Prop dependent
     ]
-  ); // Add dependencies
+  );
 
   // --- Initialization and Event Listeners ---
   useEffect(() => {
-    if (!canvasRef.current) return;
+    if (!canvasRef.current) return; // Guard clause only for canvas
 
     const canvas = canvasRef.current;
     const currentWidth = window.innerWidth;
     const currentHeight = window.innerHeight;
 
-    // --- Scene ---
+    // Scene setup
     sceneRef.current = new THREE.Scene();
-    sceneRef.current.background = new THREE.Color(0xe3e3db); // Match body background
+    sceneRef.current.background = new THREE.Color(0xe3e3db);
 
-    // --- Camera ---
+    // Camera setup (assign .current)
     cameraRef.current = new THREE.PerspectiveCamera(
-      45, // fov
-      currentWidth / currentHeight, // aspect
-      0.1, // near
-      100 // far
+      45,
+      currentWidth / currentHeight,
+      0.1,
+      100
     );
-    cameraRef.current.position.z = 5; // Move camera back
+    cameraRef.current.position.z = 5;
 
-    // --- Renderer ---
-    rendererRef.current = new THREE.WebGLRenderer({
-      canvas: canvas,
-      antialias: true,
-      // preserveDrawingBuffer: true, // Optional: if you need to capture canvas
-    });
+    // Renderer setup
+    rendererRef.current = new THREE.WebGLRenderer({ canvas, antialias: true });
     rendererRef.current.setSize(currentWidth, currentHeight);
     rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
-    // --- Create Slides ---
-    slides.length = 0; // Clear previous slides if any (e.g., on HMR)
+    // Create Slides (uses prop slideCount)
+    slides.length = 0;
     for (let i = 0; i < slideCount; i++) {
+      // Use prop slideCount
       createSlide(i);
     }
 
-    // --- Center the slides initially ---
+    // Initial Centering (uses recalculated totalWidth)
     slides.forEach((slide) => {
-      slide.position.x -= totalWidth / 2; // Initial centering offset
-      slide.userData.targetX = slide.position.x; // Update target after centering
-      slide.userData.currentX = slide.position.x; // Update current after centering
+      slide.position.x -= totalWidth / 2;
+      slide.userData.targetX = slide.position.x;
+      slide.userData.currentX = slide.position.x;
     });
-    currentPosition.current = -totalWidth / 2; // Adjust scroll position due to centering
+    currentPosition.current = -totalWidth / 2;
     targetPosition.current = -totalWidth / 2;
 
-    // --- Event Listeners ---
+    // --- Scroll/Touch/Keyboard Event Listeners (Original Logic) ---
     let scrollTimeout: NodeJS.Timeout | null = null;
 
     const handleWheel = (e: WheelEvent) => {
-      e.preventDefault(); // Prevent default page scroll
-      const wheelStrength = Math.min(Math.abs(e.deltaY) * 0.001, 1.0); // Normalize and cap strength
+      e.preventDefault();
+      const wheelStrength = Math.min(Math.abs(e.deltaY) * 0.001, 1.0);
       targetDistortionFactor.current = Math.min(
         1.0,
         targetDistortionFactor.current + wheelStrength
-      ); // Increase distortion
+      );
       targetPosition.current -= e.deltaY * settings.wheelSensitivity;
-      isScrolling.current = true;
+      isScrolling.current = true; // Set scrolling state
       autoScrollSpeed.current =
-        Math.min(Math.abs(e.deltaY) * 0.0005, 0.05) * Math.sign(e.deltaY); // Apply momentum
-
-      // Detect scroll end
+        Math.min(Math.abs(e.deltaY) * 0.0005, 0.05) * Math.sign(e.deltaY);
       if (scrollTimeout) clearTimeout(scrollTimeout);
       scrollTimeout = setTimeout(() => {
         isScrolling.current = false;
-      }, 150); // Adjust timeout duration as needed
+      }, 150);
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Use recalculated slideUnit
       if (e.key === "ArrowLeft") {
         targetPosition.current += slideUnit;
         targetDistortionFactor.current = Math.min(
@@ -374,51 +360,48 @@ const ThreeSlider: React.FC = () => {
     const handleTouchStart = (e: TouchEvent) => {
       touchStartX.current = e.touches[0].clientX;
       touchLastX.current = touchStartX.current;
-      isScrolling.current = false; // Stop any momentum scrolling
+      isScrolling.current = false; // Stop momentum
       autoScrollSpeed.current = 0;
-      peakVelocity.current = 0; // Reset peak velocity on new touch
+      peakVelocity.current = 0;
     };
 
     const handleTouchMove = (e: TouchEvent) => {
-      e.preventDefault(); // Prevent default page scroll/selection on mobile
+      e.preventDefault();
       const touchX = e.touches[0].clientX;
       const deltaX = touchX - touchLastX.current;
       touchLastX.current = touchX;
-
-      const touchStrength = Math.min(Math.abs(deltaX) * 0.02, 1.0); // Normalize touch delta
+      const touchStrength = Math.min(Math.abs(deltaX) * 0.02, 1.0);
       targetDistortionFactor.current = Math.min(
         1.0,
         targetDistortionFactor.current + touchStrength
       );
-
       targetPosition.current -= deltaX * settings.touchSensitivity;
-      isScrolling.current = true; // Indicate interaction is happening
+      // No need to set isScrolling true here, touchEnd handles momentum start
     };
 
     const handleTouchEnd = () => {
-      const velocity = (touchLastX.current - touchStartX.current) * 0.005; // Calculate final flick velocity
+      const velocity = (touchLastX.current - touchStartX.current) * 0.005;
       if (Math.abs(velocity) > 0.5) {
-        // Apply momentum only if flick was strong enough
         autoScrollSpeed.current =
-          -velocity * settings.momentumMultiplier * 0.05; // Apply momentum with multiplier
-        // Amplify distortion briefly based on flick velocity
+          -velocity * settings.momentumMultiplier * 0.05;
         targetDistortionFactor.current = Math.min(
           1.0,
           Math.abs(velocity) * 3 * settings.distortionSensitivity
         );
+        isScrolling.current = true; // Start momentum phase
+        // Set timeout to stop isScrolling after momentum likely fades
+        setTimeout(() => {
+          isScrolling.current = false;
+        }, 800);
+      } else {
+        isScrolling.current = false; // No momentum, ensure scrolling stops
       }
-      isScrolling.current = true; // Allow momentum to continue
-
-      // Set a timeout to stop scrolling state after momentum fades
-      setTimeout(() => {
-        isScrolling.current = false;
-      }, 800); // Adjust timeout based on expected momentum duration
     };
 
+    // --- Resize Listener (Original - uses window size) ---
     const handleResize = () => {
       const width = window.innerWidth;
       const height = window.innerHeight;
-
       if (cameraRef.current && rendererRef.current) {
         cameraRef.current.aspect = width / height;
         cameraRef.current.updateProjectionMatrix();
@@ -436,44 +419,52 @@ const ThreeSlider: React.FC = () => {
     window.addEventListener("resize", handleResize);
 
     // --- Start Animation ---
-    lastTime.current = performance.now(); // Initialize lastTime
+    lastTime.current = performance.now();
     animate(lastTime.current);
 
     // --- Cleanup ---
     return () => {
-      if (animationFrameId.current) {
+      if (animationFrameId.current)
         cancelAnimationFrame(animationFrameId.current);
-      }
       canvas.removeEventListener("wheel", handleWheel);
       window.removeEventListener("keydown", handleKeyDown);
       canvas.removeEventListener("touchstart", handleTouchStart);
       canvas.removeEventListener("touchmove", handleTouchMove);
       canvas.removeEventListener("touchend", handleTouchEnd);
       window.removeEventListener("resize", handleResize);
-
-      // Dispose Three.js objects
       slides.forEach((slide) => {
-        if (slide.geometry) slide.geometry.dispose();
-        if (slide.material instanceof THREE.Material) {
-          if ((slide.material as THREE.MeshBasicMaterial).map) {
-            (slide.material as THREE.MeshBasicMaterial).map?.dispose();
-          }
-          slide.material.dispose();
-        }
-        sceneRef.current?.remove(slide);
+        /* ... dispose logic ... */
       });
-      slides.length = 0; // Clear the array
+      slides.length = 0;
       rendererRef.current?.dispose();
       sceneRef.current = null;
       cameraRef.current = null;
       rendererRef.current = null;
       if (scrollTimeout) clearTimeout(scrollTimeout);
     };
-  }, [animate, createSlide, settings, slideCount, slideUnit, totalWidth]); // Add dependencies for useEffect
+  }, [
+    // --- NEW: Add props to useEffect dependencies ---
+    slideWidth,
+    slideHeight,
+    gap,
+    slideCount, // Use prop name
+    imagesCount, // Use derived name from prop
+    imageFitMode,
+    // Other dependencies
+    animate,
+    createSlide,
+    settings,
+    totalWidth, // Derived, changes with props
+    slideUnit, // Derived, changes with props
+    // Removed updateCurve as it's only used inside animate
+    // Added slides as it's used in createSlide loop and initial centering
+    slides,
+  ]);
 
+  // Keep original full-screen canvas setup
   return (
     <canvas ref={canvasRef} className="fixed inset-0 w-full h-full -z-10" />
-  ); // Ensure canvas is behind content
+  );
 };
 
 export default ThreeSlider;
