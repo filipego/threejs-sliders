@@ -414,6 +414,67 @@ const ThreeSliderDraggable: React.FC<ThreeSliderDraggableProps> = ({
       rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     };
 
+    // --- Define Touch Event Handlers ---
+    const handleTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        const touch = e.touches[0];
+        const intersects = checkSlideIntersection(touch.clientX, touch.clientY);
+        if (intersects) {
+          // Prevent default touch behavior like scrolling the page
+          e.preventDefault();
+          isDragging.current = true;
+          // Use touch clientX for initial drag position
+          dragStartX.current = touch.clientX;
+          dragLastX.current = touch.clientX;
+          autoScrollSpeed.current = 0;
+          peakVelocity.current = 0;
+          // No cursor change needed for touch
+        }
+      }
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (isDragging.current && e.touches.length === 1) {
+        // Prevent default touch behavior like scrolling the page
+        e.preventDefault();
+        const touch = e.touches[0];
+        const currentX = touch.clientX;
+        const deltaX = currentX - dragLastX.current;
+        dragLastX.current = currentX;
+
+        // Update distortion based on drag movement (same logic as mouse)
+        const dragStrength = Math.min(Math.abs(deltaX) * 0.02, 1.0);
+        targetDistortionFactor.current = Math.min(
+          1.0,
+          targetDistortionFactor.current + dragStrength
+        );
+
+        // Update target position (same logic as mouse)
+        targetPosition.current -= deltaX * settings.dragSensitivity;
+      }
+    };
+
+    const handleTouchEnd = (e: TouchEvent) => {
+      // Check if the touch sequence ended while dragging
+      if (isDragging.current) {
+        isDragging.current = false;
+        // Calculate velocity based on the drag distance (same as mouse)
+        const velocity = (dragLastX.current - dragStartX.current) * 0.005;
+        // Apply momentum if velocity is significant (same as mouse)
+        if (Math.abs(velocity) > 0.5) {
+          autoScrollSpeed.current =
+            -velocity * settings.momentumMultiplier * 0.05;
+          // Add distortion based on flick velocity (same as mouse)
+          targetDistortionFactor.current = Math.min(
+            1.0,
+            targetDistortionFactor.current +
+              Math.abs(velocity) * settings.distortionSensitivity * 1.5
+          );
+        }
+      }
+      // No cursor change needed for touch
+    };
+
     // Add listeners using the handlers defined above
     canvas.addEventListener("mousedown", handleMouseDown);
     window.addEventListener("mousemove", handleMouseMove);
@@ -421,20 +482,33 @@ const ThreeSliderDraggable: React.FC<ThreeSliderDraggableProps> = ({
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("resize", handleResize);
 
+    // Add touch listeners
+    canvas.addEventListener("touchstart", handleTouchStart, { passive: false });
+    window.addEventListener("touchmove", handleTouchMove, { passive: false });
+    window.addEventListener("touchend", handleTouchEnd);
+    window.addEventListener("touchcancel", handleTouchEnd); // Treat cancel like end
+
     // Start Animation
     lastTime.current = performance.now();
-    animate(lastTime.current); // animate is defined outside via useCallback
+    animate(lastTime.current);
 
     // Cleanup
     return () => {
       if (animationFrameId.current)
         cancelAnimationFrame(animationFrameId.current);
-      // Use same handler references for removal
+      // Remove Mouse Listeners
       canvas.removeEventListener("mousedown", handleMouseDown);
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUpOrLeave);
+      // Remove Keyboard & Resize Listeners
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("resize", handleResize);
+      // Remove Touch Listeners
+      canvas.removeEventListener("touchstart", handleTouchStart);
+      window.removeEventListener("touchmove", handleTouchMove);
+      window.removeEventListener("touchend", handleTouchEnd);
+      window.removeEventListener("touchcancel", handleTouchEnd);
+
       // Dispose Three.js objects...
       slides.forEach((slide) => {
         if (slide.geometry) slide.geometry.dispose();
@@ -473,13 +547,11 @@ const ThreeSliderDraggable: React.FC<ThreeSliderDraggableProps> = ({
   return (
     <div
       ref={containerRef}
-      // Removed absolute positioning. Use classes for desired block layout size.
-      // Example: aspect-ratio ensures height relative to width. Or use h-96 etc.
-      className="w-full aspect-video overflow-hidden relative bg-transparent"
+      // Add touch-none to help prevent default browser touch actions on mobile
+      className="w-full aspect-video overflow-hidden relative bg-transparent touch-none"
     >
       <canvas
         ref={canvasRef}
-        // Canvas fills the container. Initial cursor is default.
         className="w-full h-full block cursor-default"
       />
     </div>
